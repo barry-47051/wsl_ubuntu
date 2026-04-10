@@ -14,7 +14,7 @@
             }
         },      
         {
-            "label": "exportl",
+            "label": "export",
             "type": "shell",
             "command": "docker run --name AAA ${input:target}:latest; docker container export -o ./1-deploy/${input:target}.tar AAA; docker container rm AAA; docker save -o ./1-deploy/${input:target}.image.tar ${input:target}:latest",
             "problemMatcher": []

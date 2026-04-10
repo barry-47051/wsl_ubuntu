@@ -1,6 +1,6 @@
-FROM ubuntu:25.04
+FROM ubuntu:25.10
 
-LABEL authors="Barrypp.zzx"
+LABEL authors="barry"
 LABEL description="for wsl"
 
 ENV LC_ALL=C.UTF-8 LANG=C.UTF-8
