@@ -7,14 +7,96 @@ ENV LC_ALL=C.UTF-8 LANG=C.UTF-8
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
-RUN apt-get update \
- && DEBIAN_FRONTEND=noninteractive apt-get install -y \
- iptables lsof curl wget nano socat locales \
- iputils-ping mtr-tiny iproute2 httping \
- iperf iperf3 tcpdump iptraf iftop \
- g++ gdb make ninja-build rsync \
- xz-utils zip \
- usbutils \
- && apt-get autoclean && rm -rf /var/lib/apt/lists/*
+# 防止软件包安装阶段在非 systemd 构建环境中尝试启动服务。
+RUN set -eux; \
+    printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d; \
+    chmod +x /usr/sbin/policy-rc.d; \
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime; \
+    echo "$TZ" > /etc/timezone; \
+    apt-get update; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        systemd systemd-sysv dbus dbus-user-session \
+        openssh-client openssh-server \
+        avahi-daemon avahi-utils libnss-mdns \
+        iptables lsof curl wget nano socat locales \
+        iputils-ping mtr-tiny iproute2 httping \
+        iperf iperf3 tcpdump iptraf iftop \
+        g++ gdb make ninja-build rsync \
+        xz-utils zip usbutils; \
+    rm -f /usr/sbin/policy-rc.d; \
+    apt-get autoclean; \
+    rm -rf /var/lib/apt/lists/*
+
+# WSL 启用 systemd，并固定主机名以便通过 zbookg5-wsl.local 进行 mDNS 解析。
+RUN set -eux; \
+    printf '%s\n' \
+        '[boot]' \
+        'systemd=true' \
+        '' \
+        '[network]' \
+        'hostname=zbookg5-wsl' \
+        'generateHosts=true' \
+        > /etc/wsl.conf
+
+# root 的 SSH 客户端配置。
+RUN set -eux; \
+    install -d -m 0700 /root/.ssh; \
+    printf '%s\n' \
+        'Host zbookg5-wsl.local' \
+        '    HostName zbookg5-wsl.local' \
+        '    Port 2222' \
+        '    User root' \
+        '    IdentityFile ~/.ssh/wsl2_openssh' \
+        '    IdentitiesOnly yes' \
+        '    AddKeysToAgent yes' \
+        > /root/.ssh/config; \
+    chmod 0600 /root/.ssh/config
+
+# 将构建上下文中的私钥安装到 root 的 SSH 目录。
+# 注意：此方式会将私钥保留在镜像层中。
+COPY --chown=root:root --chmod=0600 key/wsl2_openssh /root/.ssh/wsl2_openssh
+
+# SSH 服务监听 2222；Ubuntu 的 ssh.socket 使用 socket activation，需同时覆盖 socket 端口。
+RUN set -eux; \
+    install -d -m 0755 /etc/ssh/sshd_config.d /etc/systemd/system/ssh.socket.d; \
+    printf '%s\n' 'Port 2222' > /etc/ssh/sshd_config.d/10-wsl-port.conf; \
+    printf '%s\n' \
+        '[Socket]' \
+        'ListenStream=' \
+        'ListenStream=2222' \
+        > /etc/systemd/system/ssh.socket.d/listen.conf
+
+# 使用 Ubuntu openssh-client 自带的 systemd user 单元，只在构建阶段启用 socket。
+# root linger 让 user manager 在开机时运行，无需等待交互式登录。
+RUN set -eux; \
+    install -d -m 0755 /var/lib/systemd/linger; \
+    touch /var/lib/systemd/linger/root; \
+    HOME=/root systemctl --user --no-reload enable ssh-agent.socket
+
+# shell 固定使用与 ssh-agent.socket 一致的 socket。
+RUN set -eux; \
+    printf '\n%s\n%s\n' \
+        '# Fixed OpenSSH agent socket managed by systemd --user' \
+        'export SSH_AUTH_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/openssh_agent"' \
+        >> /root/.bashrc
+
+# 只显式启用 SSH、mDNS 和 SSH-agent 相关服务；Avahi 仅提供主机名解析，不发布 SSH 服务；禁用并屏蔽 NFS/RPC 启动项。
+RUN set -eux; \
+    systemctl set-default multi-user.target; \
+    systemctl enable ssh.socket; \
+    systemctl enable avahi-daemon.service; \
+    systemctl disable ssh.service 2>/dev/null || true; \
+    systemctl mask \
+        rpcbind.service rpcbind.socket \
+        rpc-statd.service rpc-statd-notify.service \
+        rpc-gssd.service rpc-svcgssd.service \
+        nfs-client.target nfs-server.service \
+        nfs-blkmap.service nfs-idmapd.service nfs-mountd.service \
+        nfsdcld.service nfsdcltrack.service \
+        proc-fs-nfsd.mount var-lib-nfs-rpc_pipefs.mount
 
 WORKDIR /root
+
+# 作为普通 Docker systemd 容器运行时使用；导入 WSL 后由 /etc/wsl.conf 接管。
+STOPSIGNAL SIGRTMIN+3
+CMD ["/sbin/init"]
